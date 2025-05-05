@@ -44,7 +44,7 @@ class Settings(BaseSettings):
 
     class Config:
         # If your .env file is not in the root directory, adjust the path accordingly.
-        env_file = ".env"
+        env_file = "local.env"
         env_file_encoding = 'utf-8'
 
 # Instantiate settings to be imported in your application
