@@ -44,7 +44,7 @@ def upgrade() -> None:
     sa.PrimaryKeyConstraint('id')
     )
     op.create_index(op.f('ix_users_email'), 'users', ['email'], unique=True)
-    op.create_index(op.f('ix_users_nickname'), 'users', ['nickname'], unique=True)
+    op.create_index(op.f('ix_users_nickname'), 'users', ['nickname'], unique=False)
     # ### end Alembic commands ###
 
 

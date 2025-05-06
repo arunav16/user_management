@@ -10,7 +10,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.database import Base
 
 class UserRole(Enum):
-    """Enumeration of user roles within the application, stored as ENUM in the database."""
+    """Enumeration of user roles witr privacyhin the application, stored as ENUM in the database."""
     ANONYMOUS = "ANONYMOUS"
     AUTHENTICATED = "AUTHENTICATED"
     MANAGER = "MANAGER"
@@ -23,7 +23,7 @@ class User(Base):
     
     Attributes:
         id (UUID): Unique identifier for the user.
-        nickname (str): Unique nickname for privacy, required.
+        nickname (str):nickname , required.
         email (str): Unique email address, required.
         email_verified (bool): Flag indicating if the email has been verified.
         hashed_password (str): Hashed password for security, required.
