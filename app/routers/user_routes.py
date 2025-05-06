@@ -103,7 +103,7 @@ async def delete_user(
     user_id: UUID,
     db: AsyncSession = Depends(get_db),
     token: str = Depends(oauth2_scheme),
-    current_user=Depends(require_role(["ADMIN", "MANAGER"])),
+    current_user=Depends(require_role(["ADMIN"])),
 ):
     if not await UserService.delete(db, user_id):
         raise HTTPException(status_code=404, detail="User not found")
