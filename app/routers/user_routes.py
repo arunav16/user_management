@@ -1,201 +1,133 @@
-"""
-This Python file is part of a FastAPI application, demonstrating user management functionalities including creating, reading,
-updating, and deleting (CRUD) user information. It uses OAuth2 with Password Flow for security, ensuring that only authenticated
-users can perform certain operations. Additionally, the file showcases the integration of FastAPI with SQLAlchemy for asynchronous
-database operations, enhancing performance by non-blocking database calls.
-
-The implementation emphasizes RESTful API principles, with endpoints for each CRUD operation and the use of HTTP status codes
-and exceptions to communicate the outcome of operations. It introduces the concept of HATEOAS (Hypermedia as the Engine of
-Application State) by including navigational links in API responses, allowing clients to discover other related operations dynamically.
-
-OAuth2PasswordBearer is employed to extract the token from the Authorization header and verify the user's identity, providing a layer
-of security to the operations that manipulate user data.
-
-Key Highlights:
-- Use of FastAPI's Dependency Injection system to manage database sessions and user authentication.
-- Demonstrates how to perform CRUD operations in an asynchronous manner using SQLAlchemy with FastAPI.
-- Implements HATEOAS by generating dynamic links for user-related actions, enhancing API discoverability.
-- Utilizes OAuth2PasswordBearer for securing API endpoints, requiring valid access tokens for operations.
-"""
-
-from builtins import dict, int, len, str
-from datetime import timedelta
-from datetime import date
-from typing import Optional
-from fastapi import Query
-from app.schemas.user_schemas import UserRole
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, Response, status, Request
+from datetime import timedelta, date
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Response, status, Request, Query
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.dependencies import get_current_user, get_db, get_email_service, require_role
-from app.schemas.pagination_schema import EnhancedPagination
+
+from app.dependencies import get_db, get_email_service, require_role, get_settings
+from app.models.user_model import UserRole
+from app.schemas.user_schemas import UserCreate, UserUpdate, UserResponse, UserListResponse
 from app.schemas.token_schema import TokenResponse
-from app.schemas.user_schemas import LoginRequest, UserBase, UserCreate, UserListResponse, UserResponse, UserUpdate
 from app.services.user_service import UserService
 from app.services.jwt_service import create_access_token
-from app.utils.link_generation import create_user_links, generate_pagination_links
-from app.dependencies import get_settings
 from app.services.email_service import EmailService
-router = APIRouter()
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
+from app.utils.link_generation import create_user_links, generate_pagination_links
+
 settings = get_settings()
-@router.get("/users/{user_id}", response_model=UserResponse, name="get_user", tags=["User Management Requires (Admin or Manager Roles)"])
-async def get_user(user_id: UUID, request: Request, db: AsyncSession = Depends(get_db), token: str = Depends(oauth2_scheme), current_user: dict = Depends(require_role(["ADMIN", "MANAGER"]))):
-    """
-    Endpoint to fetch a user by their unique identifier (UUID).
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
-    Utilizes the UserService to query the database asynchronously for the user and constructs a response
-    model that includes the user's details along with HATEOAS links for possible next actions.
+# ── CRUD routes under /users ──────────────────────────────────────────────────
 
-    Args:
-        user_id: UUID of the user to fetch.
-        request: The request object, used to generate full URLs in the response.
-        db: Dependency that provides an AsyncSession for database access.
-        token: The OAuth2 access token obtained through OAuth2PasswordBearer dependency.
-    """
+router = APIRouter(prefix="/users", tags=["User Management Requires (Admin or Manager Roles)"])
+
+
+@router.post(
+    "/",
+    response_model=UserResponse,
+    status_code=status.HTTP_201_CREATED,
+    name="create_user",
+)
+async def create_user(
+    user_in: UserCreate,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    email_service: EmailService = Depends(get_email_service),
+    token: str = Depends(oauth2_scheme),
+    current_user=Depends(require_role(["ADMIN", "MANAGER"])),
+):
+    # Prevent duplicates
+    if await UserService.get_by_email(db, user_in.email):
+        raise HTTPException(status_code=400, detail="Email already exists")
+
+    created = await UserService.create(db, user_in.model_dump(), email_service)
+    if not created:
+        raise HTTPException(status_code=500, detail="Failed to create user")
+
+    resp = UserResponse.model_validate(created)
+    resp.links = create_user_links(created.id, request)
+    return resp
+
+
+@router.get(
+    "/{user_id}",
+    response_model=UserResponse,
+    name="get_user",
+)
+async def get_user(
+    user_id: UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    token: str = Depends(oauth2_scheme),
+    current_user=Depends(require_role(["ADMIN", "MANAGER"])),
+):
     user = await UserService.get_by_id(db, user_id)
     if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        raise HTTPException(status_code=404, detail="User not found")
 
-    return UserResponse.model_construct(
-        id=user.id,
-        nickname=user.nickname,
-        first_name=user.first_name,
-        last_name=user.last_name,
-        bio=user.bio,
-        profile_picture_url=user.profile_picture_url,
-        github_profile_url=user.github_profile_url,
-        linkedin_profile_url=user.linkedin_profile_url,
-        role=user.role,
-        email=user.email,
-        last_login_at=user.last_login_at,
-        created_at=user.created_at,
-        updated_at=user.updated_at,
-        links=create_user_links(user.id, request)  
-    )
-
-# Additional endpoints for update, delete, create, and list users follow a similar pattern, using
-# asynchronous database operations, handling security with OAuth2PasswordBearer, and enhancing response
-# models with dynamic HATEOAS links.
-
-# This approach not only ensures that the API is secure and efficient but also promotes a better client
-# experience by adhering to REST principles and providing self-discoverable operations.
-
-@router.put("/users/{user_id}", response_model=UserResponse, name="update_user", tags=["User Management Requires (Admin or Manager Roles)"])
-async def update_user(user_id: UUID, user_update: UserUpdate, request: Request, db: AsyncSession = Depends(get_db), token: str = Depends(oauth2_scheme), current_user: dict = Depends(require_role(["ADMIN", "MANAGER"]))):
-    """
-    Update user information.
-
-    - **user_id**: UUID of the user to update.
-    - **user_update**: UserUpdate model with updated user information.
-    """
-    user_data = user_update.model_dump(exclude_unset=True)
-    updated_user = await UserService.update(db, user_id, user_data)
-    if not updated_user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-
-    return UserResponse.model_construct(
-        id=updated_user.id,
-        bio=updated_user.bio,
-        first_name=updated_user.first_name,
-        last_name=updated_user.last_name,
-        nickname=updated_user.nickname,
-        email=updated_user.email,
-        role=updated_user.role,
-        last_login_at=updated_user.last_login_at,
-        profile_picture_url=updated_user.profile_picture_url,
-        github_profile_url=updated_user.github_profile_url,
-        linkedin_profile_url=updated_user.linkedin_profile_url,
-        created_at=updated_user.created_at,
-        updated_at=updated_user.updated_at,
-        links=create_user_links(updated_user.id, request)
-    )
+    resp = UserResponse.model_validate(user)
+    resp.links = create_user_links(user.id, request)
+    return resp
 
 
-@router.delete("/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT, name="delete_user", tags=["User Management Requires (Admin or Manager Roles)"])
-async def delete_user(user_id: UUID, db: AsyncSession = Depends(get_db), token: str = Depends(oauth2_scheme), current_user: dict = Depends(require_role(["ADMIN", "MANAGER"]))):
-    """
-    Delete a user by their ID.
+@router.put(
+    "/{user_id}",
+    response_model=UserResponse,
+    name="update_user",
+)
+async def update_user(
+    user_id: UUID,
+    user_update: UserUpdate,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    token: str = Depends(oauth2_scheme),
+    current_user=Depends(require_role(["ADMIN", "MANAGER"])),
+):
+    data = user_update.model_dump(exclude_unset=True)
+    updated = await UserService.update(db, user_id, data)
+    if not updated:
+        raise HTTPException(status_code=404, detail="User not found")
 
-    - **user_id**: UUID of the user to delete.
-    """
-    success = await UserService.delete(db, user_id)
-    if not success:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    resp = UserResponse.model_validate(updated)
+    resp.links = create_user_links(updated.id, request)
+    return resp
+
+
+@router.delete(
+    "/{user_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    name="delete_user",
+)
+async def delete_user(
+    user_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    token: str = Depends(oauth2_scheme),
+    current_user=Depends(require_role(["ADMIN", "MANAGER"])),
+):
+    if not await UserService.delete(db, user_id):
+        raise HTTPException(status_code=404, detail="User not found")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-
-@router.post("/users/", response_model=UserResponse, status_code=status.HTTP_201_CREATED, tags=["User Management Requires (Admin or Manager Roles)"], name="create_user")
-async def create_user(user: UserCreate, request: Request, db: AsyncSession = Depends(get_db), email_service: EmailService = Depends(get_email_service), token: str = Depends(oauth2_scheme), current_user: dict = Depends(require_role(["ADMIN", "MANAGER"]))):
-    """
-    Create a new user.
-
-    This endpoint creates a new user with the provided information. If the email
-    already exists, it returns a 400 error. On successful creation, it returns the
-    newly created user's information along with links to related actions.
-
-    Parameters:
-    - user (UserCreate): The user information to create.
-    - request (Request): The request object.
-    - db (AsyncSession): The database session.
-
-    Returns:
-    - UserResponse: The newly created user's information along with navigation links.
-    """
-    existing_user = await UserService.get_by_email(db, user.email)
-    if existing_user:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already exists")
-    
-    created_user = await UserService.create(db, user.model_dump(), email_service)
-    if not created_user:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create user")
-    
-    
-    return UserResponse.model_construct(
-        id=created_user.id,
-        bio=created_user.bio,
-        first_name=created_user.first_name,
-        last_name=created_user.last_name,
-        profile_picture_url=created_user.profile_picture_url,
-        nickname=created_user.nickname,
-        email=created_user.email,
-        role=created_user.role,
-        last_login_at=created_user.last_login_at,
-        created_at=created_user.created_at,
-        updated_at=created_user.updated_at,
-        links=create_user_links(created_user.id, request)
-    )
-
-
-from datetime import date
-from typing import Optional
-from fastapi import APIRouter, Depends, Query, Request
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.dependencies import get_db, require_role
-from app.models.user_model import UserRole
-from app.schemas.user_schemas import UserResponse, UserListResponse
-from app.services.user_service import UserService
-from app.utils.link_generation import generate_pagination_links
-
-router = APIRouter()
-
-@router.get("/users/", response_model=UserListResponse, tags=["User Management Requires (Admin or Manager Roles)"])
+@router.get(
+    "/",
+    response_model=UserListResponse,
+    name="list_users",
+)
 async def list_users(
     request: Request,
-    search: Optional[str]         = Query(None, description="username or email substring"),
-    role:   Optional[UserRole]    = Query(None, description="Filter by role"),
+    search: Optional[str] = Query(None, description="username or email substring"),
+    role: Optional[UserRole] = Query(None, description="Filter by role"),
     is_professional: Optional[bool] = Query(None, description="Filter by professional status"),
-    registered_from: Optional[date] = Query(None, description="Registration date ≥ this date (YYYY-MM-DD)"),
-    registered_to:   Optional[date] = Query(None, description="Registration date ≤ this date (YYYY-MM-DD)"),
-    page:  int                   = Query(1, ge=1, description="Page number"),
-    size:  int                   = Query(10, ge=1, le=100, description="Items per page"),
-    sort_by:    str             = Query("created_at", description="Field to sort by"),
-    sort_order: str             = Query("desc", regex="^(asc|desc)$", description="Sort direction"),
-    db: AsyncSession            = Depends(get_db),
-    current_user: dict          = Depends(require_role(["ADMIN", "MANAGER"]))
+    registered_from: Optional[date] = Query(None, description="Registration date ≥ this date"),
+    registered_to: Optional[date] = Query(None, description="Registration date ≤ this date"),
+    page: int = Query(1, ge=1, description="Page number"),
+    size: int = Query(10, ge=1, le=100, description="Items per page"),
+    sort_by: str = Query("created_at", description="Field to sort by"),
+    sort_order: str = Query("desc", regex="^(asc|desc)$", description="Sort direction"),
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(require_role(["ADMIN", "MANAGER"])),
 ):
     offset = (page - 1) * size
 
@@ -220,68 +152,60 @@ async def list_users(
         registered_to=registered_to,
     )
 
-    links = generate_pagination_links(request, offset, size, total)
+    raw_links = generate_pagination_links(request, offset, size, total)
+    links = [{"rel": link.rel, "href": link.href} for link in raw_links]
 
     return UserListResponse(
         items=[UserResponse.model_validate(u) for u in users],
         total=total,
         page=page,
         size=len(users),
-        links=links
+        links=links,
     )
 
 
+# ── Auth routes (outside /users prefix) ────────────────────────────────────────
 
-@router.post("/register/", response_model=UserResponse, tags=["Login and Registration"])
-async def register(user_data: UserCreate, session: AsyncSession = Depends(get_db), email_service: EmailService = Depends(get_email_service)):
-    user = await UserService.register_user(session, user_data.model_dump(), email_service)
-    if user:
-        return user
-    raise HTTPException(status_code=400, detail="Email already exists")
+auth_router = APIRouter(tags=["Login and Registration"])
 
-@router.post("/login/", response_model=TokenResponse, tags=["Login and Registration"])
-async def login(form_data: OAuth2PasswordRequestForm = Depends(), session: AsyncSession = Depends(get_db)):
-    if await UserService.is_account_locked(session, form_data.username):
+
+@auth_router.post("/register/", response_model=UserResponse, name="register")
+async def register(
+    user_in: UserCreate,
+    db: AsyncSession = Depends(get_db),
+    email_service: EmailService = Depends(get_email_service),
+):
+    user = await UserService.register_user(db, user_in.model_dump(), email_service)
+    if not user:
+        raise HTTPException(status_code=400, detail="Email already exists")
+    return UserResponse.model_validate(user)
+
+
+@auth_router.post("/login/", response_model=TokenResponse, name="login")
+async def login(
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: AsyncSession = Depends(get_db),
+):
+    if await UserService.is_account_locked(db, form_data.username):
         raise HTTPException(status_code=400, detail="Account locked due to too many failed login attempts.")
-
-    user = await UserService.login_user(session, form_data.username, form_data.password)
-    if user:
-        access_token_expires = timedelta(minutes=settings.access_token_expire_minutes)
-
-        access_token = create_access_token(
-            data={"sub": user.email, "role": str(user.role.name)},
-            expires_delta=access_token_expires
-        )
-
-        return {"access_token": access_token, "token_type": "bearer"}
-    raise HTTPException(status_code=401, detail="Incorrect email or password.")
-
-@router.post("/login/", include_in_schema=False, response_model=TokenResponse, tags=["Login and Registration"])
-async def login(form_data: OAuth2PasswordRequestForm = Depends(), session: AsyncSession = Depends(get_db)):
-    if await UserService.is_account_locked(session, form_data.username):
-        raise HTTPException(status_code=400, detail="Account locked due to too many failed login attempts.")
-
-    user = await UserService.login_user(session, form_data.username, form_data.password)
-    if user:
-        access_token_expires = timedelta(minutes=settings.access_token_expire_minutes)
-
-        access_token = create_access_token(
-            data={"sub": user.email, "role": str(user.role.name)},
-            expires_delta=access_token_expires
-        )
-
-        return {"access_token": access_token, "token_type": "bearer"}
-    raise HTTPException(status_code=401, detail="Incorrect email or password.")
+    user = await UserService.login_user(db, form_data.username, form_data.password)
+    if not user:
+        raise HTTPException(status_code=401, detail="Incorrect email or password.")
+    access_token_expires = timedelta(minutes=settings.access_token_expire_minutes)
+    access_token = create_access_token(
+        data={"sub": user.email, "role": str(user.role.name)},
+        expires_delta=access_token_expires,
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
 
 
-@router.get("/verify-email/{user_id}/{token}", status_code=status.HTTP_200_OK, name="verify_email", tags=["Login and Registration"])
-async def verify_email(user_id: UUID, token: str, db: AsyncSession = Depends(get_db), email_service: EmailService = Depends(get_email_service)):
-    """
-    Verify user's email with a provided token.
-    
-    - **user_id**: UUID of the user to verify.
-    - **token**: Verification token sent to the user's email.
-    """
-    if await UserService.verify_email_with_token(db, user_id, token):
-        return {"message": "Email verified successfully"}
-    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired verification token")
+@auth_router.get("/verify-email/{user_id}/{token}", name="verify_email")
+async def verify_email(
+    user_id: UUID,
+    token: str,
+    db: AsyncSession = Depends(get_db),
+    email_service: EmailService = Depends(get_email_service),
+):
+    if not await UserService.verify_email_with_token(db, user_id, token):
+        raise HTTPException(status_code=400, detail="Invalid or expired verification token")
+    return {"message": "Email verified successfully"}
