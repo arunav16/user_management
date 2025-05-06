@@ -20,6 +20,10 @@ Key Highlights:
 
 from builtins import dict, int, len, str
 from datetime import timedelta
+from datetime import date
+from typing import Optional
+from fastapi import Query
+from app.schemas.user_schemas import UserRole
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Response, status, Request
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
@@ -165,31 +169,67 @@ async def create_user(user: UserCreate, request: Request, db: AsyncSession = Dep
     )
 
 
+from datetime import date
+from typing import Optional
+from fastapi import APIRouter, Depends, Query, Request
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.dependencies import get_db, require_role
+from app.models.user_model import UserRole
+from app.schemas.user_schemas import UserResponse, UserListResponse
+from app.services.user_service import UserService
+from app.utils.link_generation import generate_pagination_links
+
+router = APIRouter()
+
 @router.get("/users/", response_model=UserListResponse, tags=["User Management Requires (Admin or Manager Roles)"])
 async def list_users(
     request: Request,
-    skip: int = 0,
-    limit: int = 10,
-    db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(require_role(["ADMIN", "MANAGER"]))
+    search: Optional[str]         = Query(None, description="username or email substring"),
+    role:   Optional[UserRole]    = Query(None, description="Filter by role"),
+    is_professional: Optional[bool] = Query(None, description="Filter by professional status"),
+    registered_from: Optional[date] = Query(None, description="Registration date ≥ this date (YYYY-MM-DD)"),
+    registered_to:   Optional[date] = Query(None, description="Registration date ≤ this date (YYYY-MM-DD)"),
+    page:  int                   = Query(1, ge=1, description="Page number"),
+    size:  int                   = Query(10, ge=1, le=100, description="Items per page"),
+    sort_by:    str             = Query("created_at", description="Field to sort by"),
+    sort_order: str             = Query("desc", regex="^(asc|desc)$", description="Sort direction"),
+    db: AsyncSession            = Depends(get_db),
+    current_user: dict          = Depends(require_role(["ADMIN", "MANAGER"]))
 ):
-    total_users = await UserService.count(db)
-    users = await UserService.list_users(db, skip, limit)
+    offset = (page - 1) * size
 
-    user_responses = [
-        UserResponse.model_validate(user) for user in users
-    ]
-    
-    pagination_links = generate_pagination_links(request, skip, limit, total_users)
-    
-    # Construct the final response with pagination details
-    return UserListResponse(
-        items=user_responses,
-        total=total_users,
-        page=skip // limit + 1,
-        size=len(user_responses),
-        links=pagination_links  # Ensure you have appropriate logic to create these links
+    users = await UserService.search_users(
+        session=db,
+        search=search,
+        role=role,
+        is_professional=is_professional,
+        registered_from=registered_from,
+        registered_to=registered_to,
+        offset=offset,
+        limit=size,
+        sort_by=sort_by,
+        sort_order=sort_order,
     )
+    total = await UserService.count_users_filtered(
+        session=db,
+        search=search,
+        role=role,
+        is_professional=is_professional,
+        registered_from=registered_from,
+        registered_to=registered_to,
+    )
+
+    links = generate_pagination_links(request, offset, size, total)
+
+    return UserListResponse(
+        items=[UserResponse.model_validate(u) for u in users],
+        total=total,
+        page=page,
+        size=len(users),
+        links=links
+    )
+
 
 
 @router.post("/register/", response_model=UserResponse, tags=["Login and Registration"])

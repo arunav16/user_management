@@ -1,6 +1,7 @@
 from builtins import Exception, bool, classmethod, int, str
-from datetime import datetime, timezone
+from datetime import datetime, timezone,date
 import secrets
+from sqlalchemy import or_, and_, select, func
 from typing import Optional, Dict, List
 from pydantic import ValidationError
 from sqlalchemy import func, null, update, select
@@ -121,6 +122,93 @@ class UserService:
         return result.scalars().all() if result else []
 
     @classmethod
+    async def search_users(
+        cls,
+        session: AsyncSession,
+        *,
+        search: Optional[str] = None,
+        role: Optional[UserRole] = None,
+        is_professional: Optional[bool] = None,
+        registered_from: Optional[date] = None,
+        registered_to: Optional[date] = None,
+        offset: int = 0,
+        limit: int = 10,
+        sort_by: str = "created_at",
+        sort_order: str = "desc",
+    ) -> List[User]:
+        """
+        Returns a page of users, filtered by text, role, professional flag, date range,
+        paginated and sorted.
+        """
+        stmt = select(User)
+
+        # 1) Text‐search on nickname OR email
+        if search:
+            pat = f"%{search}%"
+            stmt = stmt.where(or_(User.nickname.ilike(pat),
+                                  User.email.ilike(pat)))
+
+        # 2) Role filter
+        if role is not None:
+            stmt = stmt.where(User.role == role)
+
+        # 3) Professional status
+        if is_professional is not None:
+            stmt = stmt.where(User.is_professional == is_professional)
+
+        # 4) Registration date range
+        if registered_from is not None:
+            stmt = stmt.where(User.created_at >= registered_from)
+        if registered_to is not None:
+            stmt = stmt.where(User.created_at <= registered_to)
+
+        # 5) Sorting
+        # Ensure the field exists on the model, default to created_at
+        sort_col = getattr(User, sort_by, User.created_at)
+        if sort_order.lower() == "desc":
+            stmt = stmt.order_by(sort_col.desc())
+        else:
+            stmt = stmt.order_by(sort_col.asc())
+
+        # 6) Pagination
+        stmt = stmt.offset(offset).limit(limit)
+
+        result = await session.execute(stmt)
+        return result.scalars().all()
+
+
+    @classmethod
+    async def count_users_filtered(
+        cls,
+        session: AsyncSession,
+        *,
+        search: Optional[str] = None,
+        role: Optional[UserRole] = None,
+        is_professional: Optional[bool] = None,
+        registered_from: Optional[date] = None,
+        registered_to: Optional[date] = None,
+    ) -> int:
+        """
+        Returns total count of users matching the same filters as search_users (no paging).
+        """
+        stmt = select(func.count()).select_from(User)
+
+        if search:
+            pat = f"%{search}%"
+            stmt = stmt.where(or_(User.nickname.ilike(pat),
+                                  User.email.ilike(pat)))
+        if role is not None:
+            stmt = stmt.where(User.role == role)
+        if is_professional is not None:
+            stmt = stmt.where(User.is_professional == is_professional)
+        if registered_from is not None:
+            stmt = stmt.where(User.created_at >= registered_from)
+        if registered_to is not None:
+            stmt = stmt.where(User.created_at <= registered_to)
+
+        result = await session.execute(stmt)
+        return result.scalar_one()
+    @classmethod
     async def register_user(cls, session: AsyncSession, user_data: Dict[str, str], get_email_service) -> Optional[User]:
         return await cls.create(session, user_data, get_email_service)
     
@@ -201,3 +289,6 @@ class UserService:
             await session.commit()
             return True
         return False
+    
+
+
